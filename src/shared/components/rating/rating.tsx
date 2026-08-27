@@ -47,6 +47,7 @@ export const Rating = ({
                 symbolBody: styles.symbolBody,
                 ...classNames,
             }}
+            key={String(props.readOnly)}
             style={{
                 ...style,
             }}
