@@ -1,6 +1,5 @@
 import type { UseSuspenseQueryResult } from '@tanstack/react-query';
 
-import { openModal } from '@mantine/modals';
 import { forwardRef, useCallback, useImperativeHandle, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
@@ -9,7 +8,6 @@ import {
     PlaylistQueryBuilderRef,
 } from '/@/renderer/features/playlists/components/playlist-query-builder';
 import { convertQueryGroupToNDQuery } from '/@/renderer/features/playlists/utils';
-import { JsonPreview } from '/@/renderer/features/shared/components/json-preview';
 import { Box } from '/@/shared/components/box/box';
 import { Button } from '/@/shared/components/button/button';
 import { Flex } from '/@/shared/components/flex/flex';
@@ -23,21 +21,25 @@ import { Text } from '/@/shared/components/text/text';
 import { toast } from '/@/shared/components/toast/toast';
 import { SongListSort } from '/@/shared/types/domain-types';
 
+export type PlaylistQueryEditorFilters = {
+    extraFilters: {
+        limit?: number;
+        limitPercent?: number;
+        sortBy?: string[];
+        sortOrder?: string;
+    };
+    filter: Record<string, any>;
+};
+
 export interface PlaylistQueryEditorProps {
     detailQuery: UseSuspenseQueryResult<any, Error>;
+    isPreviewPending: boolean;
+    onPreview: (filters: PlaylistQueryEditorFilters) => void;
     playlistId: string;
 }
 
 export type PlaylistQueryEditorRef = {
-    getFiltersForSave: () => null | {
-        extraFilters: {
-            limit?: number;
-            limitPercent?: number;
-            sortBy?: string[];
-            sortOrder?: string;
-        };
-        filter: Record<string, any>;
-    };
+    getFiltersForSave: () => null | PlaylistQueryEditorFilters;
 };
 
 type AppliedJsonState = {
@@ -84,7 +86,7 @@ const parseRulesJsonToSaveArgs = (
 };
 
 export const PlaylistQueryEditor = forwardRef<PlaylistQueryEditorRef, PlaylistQueryEditorProps>(
-    ({ detailQuery, playlistId }, ref) => {
+    ({ detailQuery, isPreviewPending, onPreview, playlistId }, ref) => {
         const { t } = useTranslation();
         const queryBuilderRef = useRef<PlaylistQueryBuilderRef>(null);
 
@@ -92,9 +94,7 @@ export const PlaylistQueryEditor = forwardRef<PlaylistQueryEditorRef, PlaylistQu
         const [jsonText, setJsonText] = useState('');
         const [appliedJsonState, setAppliedJsonState] = useState<AppliedJsonState | null>(null);
 
-        const getFiltersForSave = useCallback((): ReturnType<
-            PlaylistQueryEditorRef['getFiltersForSave']
-        > => {
+        const getFiltersForSave = useCallback((): null | PlaylistQueryEditorFilters => {
             if (editorMode === 'json') {
                 try {
                     const parsed = JSON.parse(jsonText) as Record<string, any>;
@@ -114,24 +114,6 @@ export const PlaylistQueryEditor = forwardRef<PlaylistQueryEditorRef, PlaylistQu
         }, [editorMode, jsonText, t]);
 
         useImperativeHandle(ref, () => ({ getFiltersForSave }), [getFiltersForSave]);
-
-        const openPreviewModal = useCallback(() => {
-            const payload = getFiltersForSave();
-            if (!payload) return;
-            const previewValue = {
-                ...payload.filter,
-                ...(payload.extraFilters.limit != null && { limit: payload.extraFilters.limit }),
-                ...(payload.extraFilters.limitPercent != null && {
-                    limitPercent: payload.extraFilters.limitPercent,
-                }),
-                ...(payload.extraFilters.sortBy?.[0] && { sort: payload.extraFilters.sortBy[0] }),
-            };
-            openModal({
-                children: <JsonPreview value={previewValue} />,
-                size: 'xl',
-                title: t('common.preview'),
-            });
-        }, [getFiltersForSave, t]);
 
         const parseSortBy = useCallback((): string[] => {
             const sort = detailQuery?.data?.rules?.sort;
@@ -288,7 +270,15 @@ export const PlaylistQueryEditor = forwardRef<PlaylistQueryEditorRef, PlaylistQu
                                 value={editorMode}
                             />
                         </Group>
-                        <Button onClick={openPreviewModal} size="sm" variant="subtle">
+                        <Button
+                            loading={isPreviewPending}
+                            onClick={() => {
+                                const payload = getFiltersForSave();
+                                if (payload) onPreview(payload);
+                            }}
+                            size="sm"
+                            variant="subtle"
+                        >
                             {t('common.preview')}
                         </Button>
                     </Group>

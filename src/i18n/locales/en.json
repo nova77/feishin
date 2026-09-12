@@ -424,7 +424,8 @@
             "addRuleGroup": "Add rule group",
             "removeRuleGroup": "Remove rule group",
             "resetToDefault": "Reset to default",
-            "clearFilters": "Clear filters"
+            "clearFilters": "Clear filters",
+            "previewRestored": "Restored the rules from before the interrupted preview"
         },
         "saveQueue": {
             "success": "Saved play queue to server"

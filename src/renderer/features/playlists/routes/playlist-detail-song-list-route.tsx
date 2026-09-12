@@ -1,6 +1,6 @@
 import { closeAllModals, openModal } from '@mantine/modals';
 import { useSuspenseQuery } from '@tanstack/react-query';
-import { Suspense, useMemo, useRef, useState } from 'react';
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { generatePath, useNavigate, useParams } from 'react-router';
 
@@ -11,6 +11,7 @@ import { PlaylistDetailSongListContent } from '/@/renderer/features/playlists/co
 import { PlaylistDetailSongListHeader } from '/@/renderer/features/playlists/components/playlist-detail-song-list-header';
 import {
     PlaylistQueryEditor,
+    PlaylistQueryEditorFilters,
     PlaylistQueryEditorRef,
 } from '/@/renderer/features/playlists/components/playlist-query-editor';
 import { SaveAsPlaylistForm } from '/@/renderer/features/playlists/components/save-as-playlist-form';
@@ -36,8 +37,21 @@ import { Spinner } from '/@/shared/components/spinner/spinner';
 import { Stack } from '/@/shared/components/stack/stack';
 import { Text } from '/@/shared/components/text/text';
 import { toast } from '/@/shared/components/toast/toast';
-import { LibraryItem, ServerType } from '/@/shared/types/domain-types';
+import {
+    LibraryItem,
+    PlaylistRules,
+    ServerType,
+    UpdatePlaylistArgs,
+    UpdatePlaylistBody,
+} from '/@/shared/types/domain-types';
 import { ItemListKey } from '/@/shared/types/types';
+
+const toRules = ({ extraFilters, filter }: PlaylistQueryEditorFilters): PlaylistRules => ({
+    ...filter,
+    limit: extraFilters.limit ?? undefined,
+    limitPercent: extraFilters.limitPercent ?? undefined,
+    sort: extraFilters.sortBy?.[0] ?? '+dateAdded',
+});
 
 const PlaylistSongListFiltersSidebar = () => {
     const { t } = useTranslation();
@@ -84,85 +98,76 @@ const PlaylistDetailSongListRoute = () => {
     const [mode, setMode] = useState<'edit' | 'view'>('view');
     const queryEditorRef = useRef<PlaylistQueryEditorRef>(null);
 
-    const handleSave = (
-        filter: Record<string, any>,
-        extraFilters: {
-            limit?: number;
-            limitPercent?: number;
-            sortBy?: string[];
-            sortOrder?: string;
-        },
-    ) => {
-        if (!detailQuery?.data) return;
+    const previewMutation = useUpdatePlaylist({});
+    const { mutate: mutatePreview } = previewMutation;
+    // Request that restores the rules from before the first preview; null when no preview is applied.
+    // Mirrored to localStorage so a crash or reload mid-preview is undone on the next visit.
+    const previewSnapshotKey = `smart-playlist-preview:${server?.id}:${playlistId}`;
+    const previewRestoreArgsRef = useRef<null | UpdatePlaylistArgs>(null);
 
-        const sortValue =
-            extraFilters.sortBy && extraFilters.sortBy.length > 0
-                ? extraFilters.sortBy[0]
-                : '+dateAdded';
+    const rulesBody = (rules: PlaylistRules): UpdatePlaylistBody => ({
+        comment: detailQuery.data.description || '',
+        name: detailQuery.data.name,
+        ownerId: detailQuery.data.ownerId || '',
+        public: detailQuery.data.public || false,
+        queryBuilderRules: rules,
+        sync: detailQuery.data.sync || false,
+    });
 
-        const rules = {
-            ...filter,
-            limit: extraFilters.limit ?? undefined,
-            limitPercent: extraFilters.limitPercent ?? undefined,
-            sort: sortValue,
-        };
+    const rulesUpdateArgs = (rules: PlaylistRules): UpdatePlaylistArgs => ({
+        apiClientProps: { serverId: detailQuery.data._serverId },
+        body: rulesBody(rules),
+        query: { id: playlistId },
+    });
 
-        updatePlaylistMutation.mutate(
-            {
-                apiClientProps: { serverId: detailQuery?.data?._serverId },
-                body: {
-                    comment: detailQuery?.data?.description || '',
-                    name: detailQuery?.data?.name,
-                    ownerId: detailQuery?.data?.ownerId || '',
-                    public: detailQuery?.data?.public || false,
-                    queryBuilderRules: rules,
-                    sync: detailQuery?.data?.sync || false,
-                },
-                query: { id: playlistId },
-            },
-            {
-                onSuccess: () => {
-                    toast.success({ message: 'Playlist has been saved' });
-                    setMode('view');
-                },
-            },
-        );
+    const revertPreview = useCallback(() => {
+        if (!previewRestoreArgsRef.current) return;
+        mutatePreview(previewRestoreArgsRef.current);
+        previewRestoreArgsRef.current = null;
+        localStorage.removeItem(previewSnapshotKey);
+    }, [mutatePreview, previewSnapshotKey]);
+
+    useEffect(() => {
+        if (mode === 'view') revertPreview();
+    }, [mode, revertPreview]);
+
+    // Leaving the page (sidebar navigation, Save As) also discards the preview
+    useEffect(() => revertPreview, [revertPreview]);
+
+    // ponytail: restores unconditionally; rules edited from another client after the crash would be overwritten
+    useEffect(() => {
+        const snapshot = localStorage.getItem(previewSnapshotKey);
+        if (!snapshot) return;
+        localStorage.removeItem(previewSnapshotKey);
+        mutatePreview(JSON.parse(snapshot) as UpdatePlaylistArgs, {
+            onSuccess: () => toast.info({ message: t('form.queryEditor.previewRestored') }),
+        });
+    }, [mutatePreview, previewSnapshotKey, t]);
+
+    const handlePreview = (filters: PlaylistQueryEditorFilters) => {
+        if (!previewRestoreArgsRef.current) {
+            previewRestoreArgsRef.current = rulesUpdateArgs(detailQuery.data.rules || {});
+            localStorage.setItem(previewSnapshotKey, JSON.stringify(previewRestoreArgsRef.current));
+        }
+        mutatePreview(rulesUpdateArgs(toRules(filters)));
     };
 
-    const handleSaveAs = (
-        filter: Record<string, any>,
-        extraFilters: {
-            limit?: number;
-            limitPercent?: number;
-            sortBy?: string[];
-            sortOrder?: string;
-        },
-    ) => {
-        if (!detailQuery?.data) return;
+    const handleSave = (filters: PlaylistQueryEditorFilters) => {
+        updatePlaylistMutation.mutate(rulesUpdateArgs(toRules(filters)), {
+            onSuccess: () => {
+                toast.success({ message: 'Playlist has been saved' });
+                previewRestoreArgsRef.current = null;
+                localStorage.removeItem(previewSnapshotKey);
+                setMode('view');
+            },
+        });
+    };
 
-        const sortValue =
-            extraFilters.sortBy && extraFilters.sortBy.length > 0
-                ? extraFilters.sortBy[0]
-                : '+dateAdded';
-
-        const rules = {
-            ...filter,
-            limit: extraFilters.limit ?? undefined,
-            limitPercent: extraFilters.limitPercent ?? undefined,
-            sort: sortValue,
-        };
-
+    const handleSaveAs = (filters: PlaylistQueryEditorFilters) => {
         openModal({
             children: (
                 <SaveAsPlaylistForm
-                    body={{
-                        comment: detailQuery?.data?.description || '',
-                        name: detailQuery?.data?.name,
-                        ownerId: detailQuery?.data?.ownerId || '',
-                        public: detailQuery?.data?.public || false,
-                        queryBuilderRules: rules,
-                        sync: detailQuery?.data?.sync || false,
-                    }}
+                    body={rulesBody(toRules(filters))}
                     onCancel={closeAllModals}
                     onSuccess={(data) =>
                         navigate(
@@ -171,7 +176,7 @@ const PlaylistDetailSongListRoute = () => {
                             }),
                         )
                     }
-                    serverId={detailQuery?.data?._serverId || ''}
+                    serverId={detailQuery.data._serverId}
                 />
             ),
             title: t('common.saveAs'),
@@ -186,7 +191,7 @@ const PlaylistDetailSongListRoute = () => {
             children: (
                 <ConfirmModal
                     onConfirm={() => {
-                        handleSave(payload.filter, payload.extraFilters);
+                        handleSave(payload);
                         closeAllModals();
                     }}
                 >
@@ -248,7 +253,7 @@ const PlaylistDetailSongListRoute = () => {
                 leftSection={<Icon icon="save" />}
                 onClick={() => {
                     const payload = queryEditorRef.current?.getFiltersForSave();
-                    if (payload) handleSaveAs(payload.filter, payload.extraFilters);
+                    if (payload) handleSaveAs(payload);
                 }}
                 size="sm"
                 variant="subtle"
@@ -288,6 +293,8 @@ const PlaylistDetailSongListRoute = () => {
                 {isEditingSmartPlaylist && (
                     <PlaylistQueryEditor
                         detailQuery={detailQuery}
+                        isPreviewPending={previewMutation.isPending}
+                        onPreview={handlePreview}
                         playlistId={playlistId}
                         ref={queryEditorRef}
                     />
